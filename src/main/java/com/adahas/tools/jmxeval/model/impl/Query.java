@@ -1,11 +1,17 @@
 package com.adahas.tools.jmxeval.model.impl;
 
-import java.io.IOException;
+import java.io.*;
+import java.math.BigDecimal;
+import java.math.RoundingMode;
 import java.util.Arrays;
+import java.util.Properties;
 
 import javax.management.JMException;
 import javax.management.ObjectName;
 import javax.management.openmbean.CompositeData;
+import javax.management.openmbean.CompositeDataSupport;
+import javax.management.openmbean.OpenDataException;
+import javax.management.openmbean.TabularDataSupport;
 
 import org.apache.commons.lang3.StringUtils;
 import org.w3c.dom.Node;
@@ -90,6 +96,67 @@ public class Query extends Element implements PerfDataSupport {
         attributeValue = compositeData.get(attribute.get());
       }
 
+      // Step 1: Check if var.get() contains "PerMinute"
+      if (var.get().contains("PerMinute")) {
+        String stateFilePath = "C:\\ProgramData\\checkmk\\agent\\mrpe\\jmxeval\\tmp\\statefile.txt"; // set your state file path
+        Properties stateProps = new Properties();
+        File stateFile = new File(stateFilePath);
+        Long previousValue = 0L;
+        Long previousTimestamp = 0L;
+        BigDecimal rateOfChange;
+
+        // Step 2: Retrieve the previous value of attributeValue from the state file
+        if (stateFile.exists()) {
+          try (FileInputStream in = new FileInputStream(stateFile)) {
+            stateProps.load(in);
+            String previousValueString = stateProps.getProperty(var.get());
+            String previousTimestampString = stateProps.getProperty(var.get() + "_timestamp");
+            if (previousValueString != null) {
+              previousValue = Long.parseLong(previousValueString);
+            }
+            if (previousTimestampString != null) {
+              previousTimestamp = Long.parseLong(previousTimestampString);
+            }
+          } catch (IOException | NumberFormatException e) {
+            // Handle exception
+            e.printStackTrace();
+          }
+        } else {
+          // If stateFile doesn't exist, set the previous value to the current value
+          previousValue = Long.parseLong(attributeValue.toString());
+          previousTimestamp = System.currentTimeMillis();
+        }
+
+        // Step 3: Calculate the rate of change of attributeValue
+        Long currentValue = Long.parseLong(attributeValue.toString());
+        Long currentTimestamp = System.currentTimeMillis();
+        Long elapsedTimeInMinutes = (currentTimestamp - previousTimestamp) / (1000 * 60);
+        elapsedTimeInMinutes = elapsedTimeInMinutes == 0 ? 1 : elapsedTimeInMinutes; // Avoid division by zero
+        rateOfChange = BigDecimal.valueOf(previousValue > currentValue ? 0 : (double) (currentValue - previousValue) / elapsedTimeInMinutes).setScale(2, RoundingMode.HALF_UP);
+
+        // Step 4: Save the new value of attributeValue to the state file
+        stateProps.setProperty(var.get(), attributeValue.toString());
+        stateProps.setProperty(var.get() + "_timestamp", currentTimestamp.toString());
+        try {
+          if (!stateFile.exists()) {
+            // Create directories if they don't exist
+            stateFile.getParentFile().mkdirs();
+            stateFile.createNewFile();
+          }
+          try (FileOutputStream out = new FileOutputStream(stateFile)) {
+            stateProps.store(out, null);
+          }
+        } catch (IOException e) {
+          // Handle exception
+          e.printStackTrace();
+        }
+
+        // Set the rate of change as the new attributeValue
+        attributeValue = rateOfChange;
+      } else if (var.get().contains("CMSOldGen") && attributeValue instanceof TabularDataSupport) {
+        attributeValue = getCmsOldGenUsed((TabularDataSupport) attributeValue);
+      }
+
       // set query result as variable
       context.setVar(var.get(), attributeValue);
 
@@ -103,6 +170,14 @@ public class Query extends Element implements PerfDataSupport {
 
       context.setVar(var.get(), valueOnFailure.get());
     }
+  }
+
+  public static Long getCmsOldGenUsed(TabularDataSupport tabularData) throws OpenDataException {
+    CompositeDataSupport cmsOldGenData = (CompositeDataSupport) tabularData.get(new Object[] {"CMS Old Gen"});
+    CompositeDataSupport memoryUsageData = (CompositeDataSupport) cmsOldGenData.get("value");
+    Long usedMemory = (Long) memoryUsageData.get("used");
+
+    return usedMemory;
   }
 
   /**
